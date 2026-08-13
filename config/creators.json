@@ -1,0 +1,35 @@
+{
+  "settings": {
+    "notify_edits": false,
+    "initial_import_notify": false,
+    "startup_email": true,
+    "alert_on_failure": true,
+    "max_preview_chars": 300,
+    "heartbeat": {
+      "enabled": false,
+      "interval_hours": 168
+    }
+  },
+  "creators": [
+    {
+      "service": "patreon",
+      "id": "6038973",
+      "name": "Warby Picus"
+    },
+    {
+      "service": "patreon",
+      "id": "93759290",
+      "name": "Sleyca"
+    },
+    {
+      "service": "patreon",
+      "id": "48733767",
+      "name": "Casual Farmer"
+    },
+    {
+      "service": "patreon",
+      "id": "23356351",
+      "name": "Mat Haz"
+    }
+  ]
+}

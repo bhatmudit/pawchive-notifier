@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "meta": {
+    "welcomed": false,
+    "welcomed_at": null,
+    "last_digest_at": null,
+    "last_heartbeat_at": null,
+    "last_run_at": null,
+    "last_success_at": null,
+    "total_runs": 0
+  },
+  "creators": {}
+}
