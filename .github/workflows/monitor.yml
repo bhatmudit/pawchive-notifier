@@ -60,8 +60,8 @@ jobs:
           # something that actually matters (posts, failure state, digest
           # history, ...) changed.
           if git cat-file -e HEAD:data/state.json 2>/dev/null; then
-            git show HEAD:data/state.json | jq 'del(.meta.last_run_at, .meta.total_runs)' > /tmp/previous.json
-            jq 'del(.meta.last_run_at, .meta.total_runs)' data/state.json > /tmp/current.json
+            git show HEAD:data/state.json | jq 'del(.meta.last_run_at, .meta.total_runs, .meta.last_success_at)' > /tmp/previous.json
+            jq 'del(.meta.last_run_at, .meta.total_runs, .meta.last_success_at)' data/state.json > /tmp/current.json
             if diff -q /tmp/previous.json /tmp/current.json > /dev/null; then
               echo "No meaningful state change; skipping commit."
               exit 0
