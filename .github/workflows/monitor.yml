@@ -36,6 +36,7 @@ jobs:
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ inputs.notify_existing }}" = "true" ]; then
@@ -50,13 +51,25 @@ jobs:
       - name: Commit state
         if: always()
         run: |
-          if git diff --quiet -- data/state.json; then
+          if [ ! -f data/state.json ]; then
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+users.noreply.github.com"
+          # Every run touches last_run_at/total_runs, which would otherwise
+          # produce a commit every 10 minutes forever. Only commit when
+          # something that actually matters (posts, failure state, digest
+          # history, ...) changed.
+          if git cat-file -e HEAD:data/state.json 2>/dev/null; then
+            git show HEAD:data/state.json | jq 'del(.meta.last_run_at, .meta.total_runs)' > /tmp/previous.json
+            jq 'del(.meta.last_run_at, .meta.total_runs)' data/state.json > /tmp/current.json
+            if diff -q /tmp/previous.json /tmp/current.json > /dev/null; then
+              echo "No meaningful state change; skipping commit."
+              exit 0
+            fi
+          fi
 
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/state.json
           git commit -m "Update Pawchive monitor state"
           git push
