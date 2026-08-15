@@ -51,3 +51,26 @@ def test_get_creator_state_creates_and_reuses_entry():
     same_entry = get_creator_state(state, "patreon", "123")
     assert same_entry["consecutive_failures"] == 2
     assert state["creators"] == {"patreon:123": same_entry}
+
+
+def test_get_creator_state_fills_defaults_on_partial_existing_entry():
+    # Simulates a hand-edited or partially-migrated state.json where the
+    # creator key exists but is missing some of the expected fields.
+    state = empty_state()
+    state["creators"]["patreon:123"] = {"bootstrapped": True}
+
+    entry = get_creator_state(state, "patreon", "123")
+
+    assert entry["bootstrapped"] is True  # existing value preserved
+    assert entry["consecutive_failures"] == 0  # missing value filled in
+    assert entry["posts"] == {}
+
+
+def test_get_creator_state_distinguishes_same_id_different_service():
+    state = empty_state()
+    patreon_entry = get_creator_state(state, "patreon", "1")
+    other_entry = get_creator_state(state, "subscribestar", "1")
+
+    patreon_entry["consecutive_failures"] = 5
+    assert other_entry["consecutive_failures"] == 0
+    assert set(state["creators"]) == {"patreon:1", "subscribestar:1"}

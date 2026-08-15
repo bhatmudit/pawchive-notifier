@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from config import Config, ConfigError, Creator, Settings, load_config
-from notifier import EmailError, build_email, build_status_email, send_email
+from notifier import (
+    EmailError,
+    Notification,
+    NotificationKind,
+    build_email,
+    build_status_email,
+    send_email,
+)
 from pawchive import PawchiveError, fetch_creator_posts
 from state import get_creator_state, load_state, save_state
 
@@ -96,12 +103,22 @@ def _process_creator(
 def _find_edited_posts(
     posts: list[dict[str, Any]], known_posts: dict[str, Any]
 ) -> list[dict[str, Any]]:
+    """Return posts whose 'edited' timestamp changed since we last saw them.
+
+    Note: this also catches a post's *first* edit, i.e. one that went
+    from no recorded edit timestamp (``old_edited`` is ``None``) to
+    having one. An earlier version additionally required ``old_edited``
+    to be truthy, which meant a post's first-ever edit was silently
+    never reported.
+    """
     edited = []
     for post in posts:
         pid = str(post["id"])
-        old_edited = known_posts.get(pid, {}).get("edited")
+        if pid not in known_posts:
+            continue  # brand new post, not an edit - handled separately
+        old_edited = known_posts[pid].get("edited")
         new_edited = post.get("edited")
-        if pid in known_posts and old_edited and new_edited and new_edited != old_edited:
+        if new_edited and new_edited != old_edited:
             edited.append(post)
     return edited
 
@@ -132,7 +149,7 @@ def _latest_signal(meta: dict[str, Any]) -> str | None:
 
 
 def _send_required_notification(
-    notifications: list[tuple[Creator, list[dict[str, Any]], str]],
+    notifications: list[Notification],
     config: Config,
     needs_startup: bool,
     total_new: int,
@@ -185,6 +202,49 @@ def _maybe_send_heartbeat(settings: Settings, meta: dict[str, Any], config: Conf
             meta["last_heartbeat_at"] = now.isoformat()
 
 
+@dataclass
+class RunResults:
+    notifications: list[Notification]
+    had_failures: bool
+    failed_creators: list[str]
+    recovered_creators: list[str]
+
+
+def _collect_results(
+    creators: list[Creator],
+    pending_state: dict[str, Any],
+    settings: Settings,
+    initial_import_notify: bool,
+) -> RunResults:
+    """Fetch every configured creator and gather what needs reporting.
+
+    Mutates pending_state in place (via _process_creator) but never
+    touches email or the on-disk state file itself.
+    """
+    notifications: list[Notification] = []
+    had_failures = False
+    failed_creators: list[str] = []
+    recovered_creators: list[str] = []
+
+    for creator in creators:
+        result = _process_creator(creator, pending_state, settings, initial_import_notify)
+
+        if result.failed:
+            had_failures = True
+            if result.just_failed:
+                failed_creators.append(creator.name)
+            continue
+
+        if result.just_recovered:
+            recovered_creators.append(creator.name)
+        if result.new_posts:
+            notifications.append(Notification(creator, result.new_posts, NotificationKind.NEW))
+        if result.edited_posts:
+            notifications.append(Notification(creator, result.edited_posts, NotificationKind.EDITED))
+
+    return RunResults(notifications, had_failures, failed_creators, recovered_creators)
+
+
 def process(args: argparse.Namespace) -> int:
     try:
         config = load_config(CONFIG_PATH)
@@ -204,29 +264,14 @@ def process(args: argparse.Namespace) -> int:
     pending_state = json.loads(json.dumps(state))
     meta = pending_state["meta"]
 
-    notifications: list[tuple[Creator, list[dict[str, Any]], str]] = []
-    had_failures = False
-    failed_creators: list[str] = []
-    recovered_creators: list[str] = []
+    results = _collect_results(config.creators, pending_state, settings, initial_import_notify)
+    notifications = results.notifications
+    had_failures = results.had_failures
+    failed_creators = results.failed_creators
+    recovered_creators = results.recovered_creators
 
-    for creator in config.creators:
-        result = _process_creator(creator, pending_state, settings, initial_import_notify)
-
-        if result.failed:
-            had_failures = True
-            if result.just_failed:
-                failed_creators.append(creator.name)
-            continue
-
-        if result.just_recovered:
-            recovered_creators.append(creator.name)
-        if result.new_posts:
-            notifications.append((creator, result.new_posts, "new"))
-        if result.edited_posts:
-            notifications.append((creator, result.edited_posts, "edited"))
-
-    total_new = sum(len(posts) for _, posts, kind in notifications if kind == "new")
-    total_edited = sum(len(posts) for _, posts, kind in notifications if kind == "edited")
+    total_new = sum(len(n.posts) for n in notifications if n.kind is NotificationKind.NEW)
+    total_edited = sum(len(n.posts) for n in notifications if n.kind is NotificationKind.EDITED)
 
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()

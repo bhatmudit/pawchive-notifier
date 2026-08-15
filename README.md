@@ -44,6 +44,28 @@ pytest
 
 State metadata is automatically migrated if an older `state.json` is present.
 
+## Refactor notes (this revision)
+
+- `notifier.Notification` (a small dataclass) replaces the previous
+  `(Creator, list[dict], str)` tuples passed around between `main.py` and
+  `notifier.py`; a `NotificationKind` enum replaces the `"new"`/`"edited"`
+  magic strings.
+- Fixed: a post's *first* edit (no previous `edited` timestamp) is now
+  correctly reported when `notify_edits` is on. Previously it was silently
+  dropped because the old check required the *old* `edited` value to be
+  truthy.
+- Fixed: malformed numeric settings (e.g. a non-numeric
+  `max_preview_chars` or `heartbeat.interval_hours`) now raise a clear
+  `ConfigError` instead of an unhandled `ValueError`. Zero/negative
+  `heartbeat.interval_hours` and negative `max_preview_chars` are also
+  rejected.
+- Added: duplicate `(service, id)` creator entries in `creators.json` are
+  now rejected at load time, since two such entries would silently share
+  one `state.json` key.
+- Fixed a Windows-incompatible `strftime("%-d")` call in date formatting.
+- `main.process()` now delegates the per-creator fetch loop to a
+  `_collect_results()` helper for readability.
+
 ## Configuration errors fail the run
 
 `config/creators.json` is validated once, up front. A missing/malformed

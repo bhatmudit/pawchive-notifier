@@ -5,7 +5,9 @@ from __future__ import annotations
 import html
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 import requests
@@ -17,6 +19,31 @@ RESEND_URL = "https://api.resend.com/emails"
 
 class EmailError(RuntimeError):
     """Raised when an email fails to build or send."""
+
+
+class NotificationKind(str, Enum):
+    """What kind of change a batch of posts represents in a digest."""
+
+    NEW = "new"
+    EDITED = "edited"
+
+    @property
+    def label(self) -> str:
+        return "new" if self is NotificationKind.NEW else "edited"
+
+
+@dataclass(frozen=True)
+class Notification:
+    """One creator's batch of new or edited posts for a single digest.
+
+    Replaces the previous ``(Creator, list[dict], str)`` tuple so call
+    sites read as ``n.creator`` / ``n.posts`` / ``n.kind`` instead of
+    unlabeled ``n[0]`` / ``n[1]`` / ``n[2]`` indexing.
+    """
+
+    creator: Creator
+    posts: list[dict[str, Any]]
+    kind: NotificationKind
 
 
 def _strip_html(value: str) -> str:
@@ -32,9 +59,12 @@ def _format_date(value: str | None) -> str:
         return "Unknown"
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.strftime("%B %-d, %Y %H:%M UTC")
     except (ValueError, TypeError):
         return value
+    # Avoid the "%-d" (no leading zero) strftime extension: it works on
+    # Linux/macOS glibc but is not portable to Windows, so the day is
+    # formatted manually instead.
+    return f"{parsed:%B} {parsed.day}, {parsed:%Y %H:%M} UTC"
 
 
 def _post_url(creator: Creator, post: dict[str, Any]) -> str:
@@ -46,14 +76,18 @@ def _wrap_html(body: str) -> str:
     return f'<!doctype html><html><body style="{style}">{body}</body></html>'
 
 
+def _posts_sort_key(post: dict[str, Any]) -> str:
+    return post.get("published") or post.get("added") or ""
+
+
 def build_email(
-    notifications: list[tuple[Creator, list[dict[str, Any]], str]],
+    notifications: list[Notification],
     preview_chars: int = 300,
     startup_notice: bool = False,
 ) -> tuple[str, str, str]:
     """Build the digest email covering new/edited posts across creators."""
-    new_count = sum(len(posts) for _, posts, kind in notifications if kind == "new")
-    edited_count = sum(len(posts) for _, posts, kind in notifications if kind == "edited")
+    new_count = sum(len(n.posts) for n in notifications if n.kind is NotificationKind.NEW)
+    edited_count = sum(len(n.posts) for n in notifications if n.kind is NotificationKind.EDITED)
     total = new_count + edited_count
 
     subject = "[Pawchive] " + _digest_subject(notifications, new_count, edited_count, total)
@@ -68,13 +102,16 @@ def build_email(
         )
         text_lines.append("Notifier is up and running. This is the first email it has sent.\n")
 
-    for creator, posts, kind in notifications:
-        if not posts:
+    for notification in notifications:
+        if not notification.posts:
             continue
-        html_sections.append(_render_creator_section_html(creator, posts, kind, preview_chars))
-        text_lines.append(f"{creator.name} ({creator.service.upper()}) — {len(posts)} {kind}")
-        for post in sorted(posts, key=lambda p: p.get("published") or p.get("added") or ""):
-            text_lines.extend(_render_post_text(creator, post, kind))
+        html_sections.append(_render_creator_section_html(notification, preview_chars))
+        text_lines.append(
+            f"{notification.creator.name} ({notification.creator.service.upper()}) — "
+            f"{len(notification.posts)} {notification.kind.label}"
+        )
+        for post in sorted(notification.posts, key=_posts_sort_key):
+            text_lines.extend(_render_post_text(notification.creator, post, notification.kind))
 
     html_body = _wrap_html(
         f"<h1>Pawchive Updates — {total} post{'s' if total != 1 else ''}</h1>"
@@ -85,15 +122,18 @@ def build_email(
 
 
 def _digest_subject(
-    notifications: list[tuple[Creator, list[dict[str, Any]], str]],
+    notifications: list[Notification],
     new_count: int,
     edited_count: int,
     total: int,
 ) -> str:
     if len(notifications) == 1:
-        creator, posts, kind = notifications[0]
-        label = "new" if kind == "new" else "edited"
-        return f"{creator.name} — {len(posts)} {label} post{'s' if len(posts) != 1 else ''}"
+        notification = notifications[0]
+        count = len(notification.posts)
+        return (
+            f"{notification.creator.name} — {count} {notification.kind.label} "
+            f"post{'s' if count != 1 else ''}"
+        )
 
     bits = []
     if new_count:
@@ -103,26 +143,27 @@ def _digest_subject(
     return " · ".join(bits) + f" post{'s' if total != 1 else ''}"
 
 
-def _render_creator_section_html(
-    creator: Creator, posts: list[dict[str, Any]], kind: str, preview_chars: int
-) -> str:
-    label = "new" if kind == "new" else "edited"
+def _render_creator_section_html(notification: Notification, preview_chars: int) -> str:
+    creator = notification.creator
     heading = (
         f"<h2>{html.escape(creator.name)} "
-        f"<small>({html.escape(creator.service.upper())}) — {len(posts)} {label}</small></h2>"
+        f"<small>({html.escape(creator.service.upper())}) — "
+        f"{len(notification.posts)} {notification.kind.label}</small></h2>"
     )
     articles = "".join(
-        _render_post_html(creator, post, kind, preview_chars)
-        for post in sorted(posts, key=lambda p: p.get("published") or p.get("added") or "")
+        _render_post_html(creator, post, notification.kind, preview_chars)
+        for post in sorted(notification.posts, key=_posts_sort_key)
     )
     return heading + articles
 
 
-def _render_post_html(creator: Creator, post: dict[str, Any], kind: str, preview_chars: int) -> str:
+def _render_post_html(
+    creator: Creator, post: dict[str, Any], kind: NotificationKind, preview_chars: int
+) -> str:
     title = str(post.get("title") or "Untitled post")
     url = _post_url(creator, post)
     date = _format_date(post.get("published") or post.get("added"))
-    badge = "" if kind == "new" else " <span style='color:#996600'>(edited)</span>"
+    badge = "" if kind is NotificationKind.NEW else " <span style='color:#996600'>(edited)</span>"
 
     preview_html = ""
     full_text = _strip_html(str(post.get("content") or ""))
@@ -141,9 +182,9 @@ def _render_post_html(creator: Creator, post: dict[str, Any], kind: str, preview
     )
 
 
-def _render_post_text(creator: Creator, post: dict[str, Any], kind: str) -> list[str]:
+def _render_post_text(creator: Creator, post: dict[str, Any], kind: NotificationKind) -> list[str]:
     title = str(post.get("title") or "Untitled post")
-    if kind == "edited":
+    if kind is NotificationKind.EDITED:
         title += " (edited)"
     date = _format_date(post.get("published") or post.get("added"))
     url = _post_url(creator, post)

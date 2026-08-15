@@ -129,3 +129,57 @@ def test_fetch_creator_posts_non_transient_4xx_no_retry(monkeypatch):
     with pytest.raises(pawchive.PawchiveError, match="401"):
         pawchive.fetch_creator_posts("patreon", "123")
     assert len(calls) == 1
+
+
+def test_fetch_creator_posts_invalid_json_raises(monkeypatch):
+    monkeypatch.setattr(
+        pawchive.requests, "get", lambda *a, **k: FakeResponse(200, payload=None)
+    )
+
+    with pytest.raises(pawchive.PawchiveError, match="invalid JSON"):
+        pawchive.fetch_creator_posts("patreon", "123")
+
+
+def test_fetch_creator_posts_non_list_response_raises(monkeypatch):
+    monkeypatch.setattr(
+        pawchive.requests, "get", lambda *a, **k: FakeResponse(200, payload={"not": "a list"})
+    )
+
+    with pytest.raises(pawchive.PawchiveError, match="unexpected"):
+        pawchive.fetch_creator_posts("patreon", "123")
+
+
+def test_fetch_creator_posts_filters_malformed_entries(monkeypatch):
+    # Defensive: a page with junk entries (non-dicts, or dicts missing
+    # 'id') should not crash - those entries are simply dropped.
+    page = [{"id": 1}, "not a post", 42, None, {"title": "no id field"}, {"id": 2}]
+    monkeypatch.setattr(pawchive.requests, "get", lambda *a, **k: FakeResponse(200, page))
+
+    posts = pawchive.fetch_creator_posts("patreon", "123")
+    assert [p["id"] for p in posts] == [1, 2]
+
+
+def test_fetch_creator_posts_continues_when_full_page_has_no_known_ids(monkeypatch):
+    # A full page (== PAGE_SIZE) whose ids are all unknown should
+    # continue on to the next page rather than stopping early.
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        offset = (params or {}).get("o", 0)
+        calls.append(offset)
+        if offset == 0:
+            return FakeResponse(200, [{"id": i} for i in range(50)])
+        return FakeResponse(200, [{"id": i} for i in range(50, 55)])
+
+    monkeypatch.setattr(pawchive.requests, "get", fake_get)
+
+    posts = pawchive.fetch_creator_posts("patreon", "123", known_ids={"999"})
+    assert len(posts) == 55
+    assert calls == [0, 50]
+
+
+def test_fetch_creator_posts_empty_first_page(monkeypatch):
+    monkeypatch.setattr(pawchive.requests, "get", lambda *a, **k: FakeResponse(200, []))
+
+    posts = pawchive.fetch_creator_posts("patreon", "123")
+    assert posts == []
