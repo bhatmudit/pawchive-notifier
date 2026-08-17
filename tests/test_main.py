@@ -32,6 +32,29 @@ def _patch_posts(monkeypatch, posts):
     monkeypatch.setattr(main, "fetch_creator_posts", lambda *a, **k: posts)
 
 
+def test_process_fails_fast_when_email_secrets_missing(monkeypatch, tmp_path):
+    # Regression: previously a missing RESEND_API_KEY/NOTIFICATION_EMAIL
+    # was only discovered the first time an email actually needed to be
+    # sent, which (with startup_email off) could be arbitrarily far in
+    # the future. It must now fail on the very first run, before any
+    # creators are even fetched.
+    config_path = _write_config(tmp_path, startup_email=False)
+    _patch_paths(monkeypatch, tmp_path, config_path)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("NOTIFICATION_EMAIL", raising=False)
+
+    fetch_calls = []
+    monkeypatch.setattr(
+        main, "fetch_creator_posts", lambda *a, **k: fetch_calls.append(1) or []
+    )
+
+    rc = main.process(_args())
+
+    assert rc == 1
+    assert fetch_calls == []  # never even attempted to fetch
+    assert not (tmp_path / "state.json").exists()
+
+
 def test_bootstrap_run_sends_startup_email_and_commits_state(monkeypatch, tmp_path):
     config_path = _write_config(tmp_path, startup_email=True)
     _patch_paths(monkeypatch, tmp_path, config_path)
@@ -215,6 +238,38 @@ def test_heartbeat_disabled_never_sends(monkeypatch, tmp_path):
     assert main.process(_args()) == 0
     assert main.process(_args()) == 0
     assert sent == []
+
+
+def test_heartbeat_survives_corrupted_meta_timestamp(monkeypatch, tmp_path):
+    # A hand-edited or corrupted state.json timestamp must not crash the
+    # run - it should be logged and treated as "no signal" (so a
+    # heartbeat fires immediately) instead of raising deep inside
+    # scheduling.
+    config_path = _write_config(
+        tmp_path, startup_email=False, heartbeat={"enabled": True, "interval_hours": 1}
+    )
+    _patch_paths(monkeypatch, tmp_path, config_path)
+    _patch_posts(monkeypatch, [{"id": "1", "title": "Old", "published": "2026-01-01T00:00:00Z"}])
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "meta": {"last_heartbeat_at": "not-a-timestamp", "welcomed": True},
+                "creators": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sent = []
+    monkeypatch.setattr(main, "send_email", lambda **kwargs: sent.append(kwargs["subject"]))
+
+    rc = main.process(_args())
+
+    assert rc == 0
+    assert sent == ["[Pawchive] Still watching"]
 
 
 def test_invalid_config_fails_fast_without_state_changes(monkeypatch, tmp_path):

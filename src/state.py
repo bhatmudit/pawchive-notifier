@@ -13,6 +13,15 @@ from typing import Any
 
 STATE_VERSION = 2
 
+# Cap how many known posts we remember per creator, to keep state.json (and
+# the git history it's committed into) from growing forever. Safe to prune
+# the oldest entries: pawchive.fetch_creator_posts stops paginating for a
+# creator as soon as it sees *any* known post id on a page, so as long as
+# recent posts stay remembered, older pruned ones are never fetched again
+# and therefore never mistaken for "new". Ranking is by published date
+# (falling back to "" for posts missing one, which sorts them oldest).
+DEFAULT_MAX_KNOWN_POSTS_PER_CREATOR = 1500
+
 
 def _default_meta() -> dict[str, Any]:
     return {
@@ -102,3 +111,23 @@ def get_creator_state(state: dict[str, Any], service: str, creator_id: str) -> d
     entry.setdefault("consecutive_failures", 0)
     entry.setdefault("posts", {})
     return entry
+
+
+def prune_known_posts(
+    known_posts: dict[str, Any], *, keep: int = DEFAULT_MAX_KNOWN_POSTS_PER_CREATOR
+) -> int:
+    """Drop the oldest entries from a creator's known-posts map in place.
+
+    Keeps the `keep` most recently published posts and discards the rest.
+    Returns how many were dropped (0 if under the limit). See the module-
+    level comment on DEFAULT_MAX_KNOWN_POSTS_PER_CREATOR for why this is
+    safe to do without risking a pruned post being re-notified later.
+    """
+    if len(known_posts) <= keep:
+        return 0
+    ranked = sorted(
+        known_posts.items(), key=lambda item: item[1].get("published") or "", reverse=True
+    )
+    for post_id, _ in ranked[keep:]:
+        del known_posts[post_id]
+    return len(ranked) - keep

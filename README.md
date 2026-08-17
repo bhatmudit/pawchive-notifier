@@ -44,7 +44,54 @@ pytest
 
 State metadata is automatically migrated if an older `state.json` is present.
 
+## Refactor notes (latest revision)
+
+- `constants.py` and `post.py` are new: the Pawchive domain (previously
+  hardcoded independently in both `pawchive.py` and `notifier.py`) and the
+  raw post-dict field names (previously read as bare `post["id"]`,
+  `post.get("published")`, etc. in both `main.py` and `notifier.py`) each
+  now live in exactly one place.
+- Fixed: `fetch_creator_posts` no longer loops forever if the Pawchive API
+  misbehaves (e.g. ignores the pagination offset). It aborts with a clear
+  `PawchiveError` after `pawchive.MAX_PAGES` (400) pages instead of hanging
+  until the CI job's own timeout kills it hours later with no alert sent.
+- Fixed: a digest email is now capped at `notifier.MAX_POSTS_PER_SECTION`
+  (25) rendered posts per creator, with an "...and N more" note. A creator
+  posting a huge backlog at once could previously produce an oversized
+  email that fails to send, which (per the transactional-state design)
+  would retry with the same oversized email forever — a permanent stuck
+  state. Nothing is dropped from `state.json`, only from the email body.
+- Fixed: missing/invalid `RESEND_API_KEY` or `NOTIFICATION_EMAIL` now fails
+  the run immediately, the same way a bad `creators.json` does. Previously
+  this was only discovered the first time an email needed sending, which
+  (with `startup_email` disabled) could be silently broken for a long time.
+- Added: `state.prune_known_posts` caps remembered posts per creator (1500
+  by default) so `data/state.json` — and the git history it's committed
+  into — doesn't grow forever. Safe because pagination already stops as
+  soon as it sees a known post id, so pruning old, unreachable entries
+  can't cause them to be re-notified later.
+- Requests to the Pawchive API now send a `User-Agent` identifying this
+  bot, rather than Python's default one.
+- `notifier.StatusKind` replaces the bare `"startup"/"heartbeat"/"alert"/
+  "recovered"` string dispatch dict with an enum internally (mirroring
+  `NotificationKind`); `build_status_email()`'s public signature is
+  unchanged and still raises `ValueError` on an unrecognized kind.
+
 ## Refactor notes (this revision)
+
+- `pawchive.py` now reuses a single `requests.Session` across all page
+  fetches in a run instead of opening a fresh connection per request
+  (connection pooling/keep-alive), and honors a `Retry-After` header on
+  429 responses instead of always using the fixed exponential backoff.
+- Heartbeat scheduling (`_latest_signal`) no longer crashes on a
+  corrupted or hand-edited `state.json` timestamp - an unparseable or
+  timezone-naive value is logged and treated as "no signal" (heartbeat
+  fires immediately) instead of raising deep inside scheduling.
+- Added `.github/dependabot.yml` for weekly pip + GitHub Actions update
+  PRs, since `requirements.txt` uses loose ranges with no lockfile and
+  nothing previously surfaced new releases automatically.
+
+## Earlier refactor notes
 
 - `notifier.Notification` (a small dataclass) replaces the previous
   `(Creator, list[dict], str)` tuples passed around between `main.py` and

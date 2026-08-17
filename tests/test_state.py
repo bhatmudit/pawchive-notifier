@@ -1,6 +1,6 @@
 import json
 
-from state import empty_state, get_creator_state, load_state, save_state
+from state import empty_state, get_creator_state, load_state, prune_known_posts, save_state
 
 
 def test_load_state_missing_file_returns_empty_state(tmp_path):
@@ -74,3 +74,37 @@ def test_get_creator_state_distinguishes_same_id_different_service():
     patreon_entry["consecutive_failures"] = 5
     assert other_entry["consecutive_failures"] == 0
     assert set(state["creators"]) == {"patreon:1", "subscribestar:1"}
+
+
+def test_prune_known_posts_keeps_newest_and_drops_rest():
+    known_posts = {
+        "old": {"published": "2020-01-01T00:00:00Z"},
+        "mid": {"published": "2023-01-01T00:00:00Z"},
+        "new": {"published": "2026-01-01T00:00:00Z"},
+    }
+
+    dropped = prune_known_posts(known_posts, keep=2)
+
+    assert dropped == 1
+    assert set(known_posts) == {"mid", "new"}
+
+
+def test_prune_known_posts_is_a_noop_under_the_limit():
+    known_posts = {"a": {"published": "2026-01-01T00:00:00Z"}}
+
+    dropped = prune_known_posts(known_posts, keep=100)
+
+    assert dropped == 0
+    assert set(known_posts) == {"a"}
+
+
+def test_prune_known_posts_treats_missing_published_as_oldest():
+    known_posts = {
+        "no_date": {},
+        "dated": {"published": "2026-01-01T00:00:00Z"},
+    }
+
+    dropped = prune_known_posts(known_posts, keep=1)
+
+    assert dropped == 1
+    assert set(known_posts) == {"dated"}

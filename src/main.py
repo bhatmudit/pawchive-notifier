@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +21,8 @@ from notifier import (
     send_email,
 )
 from pawchive import PawchiveError, fetch_creator_posts
-from state import get_creator_state, load_state, save_state
+from post import post_edited_at, post_id
+from state import get_creator_state, load_state, prune_known_posts, save_state
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "creators.json"
@@ -74,7 +76,7 @@ def _process_creator(
     just_recovered = was_failing
     current["consecutive_failures"] = 0
 
-    new_posts = [p for p in posts if str(p["id"]) not in known_ids]
+    new_posts = [p for p in posts if post_id(p) not in known_ids]
     edited_posts = (
         _find_edited_posts(posts, known_posts) if settings.notify_edits and not bootstrap else []
     )
@@ -82,9 +84,15 @@ def _process_creator(
     # Record everything fetched. This mutates pending_state, which is only
     # persisted by the caller after any required notification succeeds.
     for post in posts:
-        pid = str(post["id"])
-        known_posts[pid] = {"edited": post.get("edited"), "published": post.get("published")}
+        known_posts[post_id(post)] = {
+            "edited": post_edited_at(post),
+            "published": post.get("published"),
+        }
     current["bootstrapped"] = True
+
+    pruned = prune_known_posts(known_posts)
+    if pruned:
+        log.info("%s: pruned %d old post record(s) to bound state.json size", creator.name, pruned)
 
     if bootstrap and not initial_import_notify:
         log.info("%s: bootstrap complete; %d existing posts remembered", creator.name, len(posts))
@@ -113,11 +121,11 @@ def _find_edited_posts(
     """
     edited = []
     for post in posts:
-        pid = str(post["id"])
+        pid = post_id(post)
         if pid not in known_posts:
             continue  # brand new post, not an edit - handled separately
         old_edited = known_posts[pid].get("edited")
-        new_edited = post.get("edited")
+        new_edited = post_edited_at(post)
         if new_edited and new_edited != old_edited:
             edited.append(post)
     return edited
@@ -135,17 +143,42 @@ def _send_notice(kind: str, **context: Any) -> bool:
     return True
 
 
-def _latest_signal(meta: dict[str, Any]) -> str | None:
+def _parse_meta_timestamp(value: str | None) -> datetime | None:
+    """Parse a meta timestamp defensively.
+
+    These come back out of state.json, which could in principle be
+    hand-edited or corrupted (or, after a schema change, contain a stale
+    format). Previously an unparseable value raised deep inside heartbeat
+    scheduling as a bare ValueError; treating it as "no signal" instead
+    means a bad timestamp just triggers an (logged) heartbeat/notice
+    rather than crashing the whole run.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        log.warning("meta: could not parse timestamp %r; ignoring it", value)
+        return None
+    if parsed.tzinfo is None:
+        # Every timestamp we write is timezone-aware (see `now.isoformat()`
+        # below); a naive one can only come from hand-editing and would
+        # otherwise crash the "now - last_signal" subtraction with a
+        # "can't subtract offset-naive and offset-aware datetimes" error.
+        log.warning("meta: timestamp %r has no timezone; ignoring it", value)
+        return None
+    return parsed
+
+
+def _latest_signal(meta: dict[str, Any]) -> datetime | None:
     """Return the newest of the timestamps that matter for heartbeat scheduling."""
     timestamps = [
-        meta.get("last_heartbeat_at"),
-        meta.get("last_digest_at"),
-        meta.get("welcomed_at"),
+        _parse_meta_timestamp(meta.get("last_heartbeat_at")),
+        _parse_meta_timestamp(meta.get("last_digest_at")),
+        _parse_meta_timestamp(meta.get("welcomed_at")),
     ]
-    timestamps = [value for value in timestamps if value]
-    if not timestamps:
-        return None
-    return max(timestamps, key=lambda value: datetime.fromisoformat(value))
+    parsed = [value for value in timestamps if value is not None]
+    return max(parsed) if parsed else None
 
 
 def _send_required_notification(
@@ -188,7 +221,7 @@ def _maybe_send_heartbeat(settings: Settings, meta: dict[str, Any], config: Conf
     last_signal = _latest_signal(meta)
     due = True
     if last_signal:
-        elapsed = now - datetime.fromisoformat(last_signal)
+        elapsed = now - last_signal
         due = elapsed >= timedelta(hours=settings.heartbeat.interval_hours)
 
     if due:
@@ -245,11 +278,36 @@ def _collect_results(
     return RunResults(notifications, had_failures, failed_creators, recovered_creators)
 
 
+def _check_email_secrets_present() -> str | None:
+    """Return an error message if required email secrets are missing, else None.
+
+    Previously this was only discovered the first time send_email() ran -
+    which, with startup_email on, usually means "immediately", but with it
+    off, a missing/typo'd RESEND_API_KEY or NOTIFICATION_EMAIL could sit
+    silently undetected until the first real digest, potentially days or
+    weeks later. Checking up front makes a misconfiguration fail loudly on
+    the very first run, the same way a bad creators.json already does.
+    """
+    missing = [
+        name
+        for name in ("RESEND_API_KEY", "NOTIFICATION_EMAIL")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        return f"required secret(s) not set: {', '.join(missing)}"
+    return None
+
+
 def process(args: argparse.Namespace) -> int:
     try:
         config = load_config(CONFIG_PATH)
     except ConfigError as exc:
         log.error("invalid configuration: %s", exc)
+        return 1
+
+    secrets_error = _check_email_secrets_present()
+    if secrets_error:
+        log.error("invalid environment: %s", secrets_error)
         return 1
 
     state = load_state(STATE_PATH)

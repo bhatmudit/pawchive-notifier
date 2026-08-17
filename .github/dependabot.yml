@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # requirements.txt / requirements-dev.txt currently use loose ranges
+  # with no lockfile, so nothing surfaces a new "requests" release
+  # automatically. Dependabot opening a PR is the cheap substitute for a
+  # real lockfile + renovate pipeline on a project this size.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
