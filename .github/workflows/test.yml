@@ -1,0 +1,26 @@
+name: Run tests
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --disable-pip-version-check -r requirements.txt
+          pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/
