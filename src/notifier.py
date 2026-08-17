@@ -13,8 +13,21 @@ from typing import Any
 import requests
 
 from config import Creator
+from constants import SITE_BASE_URL
+from post import post_content, post_display_date, post_id, post_title
 
 RESEND_URL = "https://api.resend.com/emails"
+
+# Cap how many posts render inside a single digest email. Without this, a
+# creator posting a large backlog at once (or a Pawchive bug returning way
+# more "new" posts than expected) produces an arbitrarily large HTML
+# payload. If that trips Resend's size limit, send_email fails, the
+# transactional-state logic in main.py discards the pending state so
+# nothing is lost - but the *next* run produces the exact same oversized
+# email and fails the same way, forever. Capping the rendered list breaks
+# that potential deadlock; the full set is still recorded in state.json,
+# only the email is truncated.
+MAX_POSTS_PER_SECTION = 25
 
 
 class EmailError(RuntimeError):
@@ -68,7 +81,7 @@ def _format_date(value: str | None) -> str:
 
 
 def _post_url(creator: Creator, post: dict[str, Any]) -> str:
-    return f"https://pawchive.pw/{creator.service}/user/{creator.id}/post/{post['id']}"
+    return f"{SITE_BASE_URL}/{creator.service}/user/{creator.id}/post/{post_id(post)}"
 
 
 def _wrap_html(body: str) -> str:
@@ -77,7 +90,7 @@ def _wrap_html(body: str) -> str:
 
 
 def _posts_sort_key(post: dict[str, Any]) -> str:
-    return post.get("published") or post.get("added") or ""
+    return post_display_date(post) or ""
 
 
 def build_email(
@@ -110,8 +123,11 @@ def build_email(
             f"{notification.creator.name} ({notification.creator.service.upper()}) — "
             f"{len(notification.posts)} {notification.kind.label}"
         )
-        for post in sorted(notification.posts, key=_posts_sort_key):
+        shown, hidden = _split_for_rendering(notification.posts)
+        for post in shown:
             text_lines.extend(_render_post_text(notification.creator, post, notification.kind))
+        if hidden:
+            text_lines.append(f"...and {hidden} more (see state.json / Pawchive for the rest)")
 
     html_body = _wrap_html(
         f"<h1>Pawchive Updates — {total} post{'s' if total != 1 else ''}</h1>"
@@ -143,6 +159,16 @@ def _digest_subject(
     return " · ".join(bits) + f" post{'s' if total != 1 else ''}"
 
 
+def _split_for_rendering(posts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Sort posts newest-first and cap how many get rendered into the email.
+
+    Returns (posts_to_render, count_hidden). Nothing is dropped from
+    state - this only bounds email size (see MAX_POSTS_PER_SECTION).
+    """
+    ordered = sorted(posts, key=_posts_sort_key, reverse=True)
+    return ordered[:MAX_POSTS_PER_SECTION], max(0, len(ordered) - MAX_POSTS_PER_SECTION)
+
+
 def _render_creator_section_html(notification: Notification, preview_chars: int) -> str:
     creator = notification.creator
     heading = (
@@ -150,23 +176,28 @@ def _render_creator_section_html(notification: Notification, preview_chars: int)
         f"<small>({html.escape(creator.service.upper())}) — "
         f"{len(notification.posts)} {notification.kind.label}</small></h2>"
     )
+    shown, hidden = _split_for_rendering(notification.posts)
     articles = "".join(
-        _render_post_html(creator, post, notification.kind, preview_chars)
-        for post in sorted(notification.posts, key=_posts_sort_key)
+        _render_post_html(creator, post, notification.kind, preview_chars) for post in shown
     )
+    if hidden:
+        articles += (
+            f"<p><em>...and {hidden} more not shown here "
+            "(all are recorded; see Pawchive for the full list).</em></p>"
+        )
     return heading + articles
 
 
 def _render_post_html(
     creator: Creator, post: dict[str, Any], kind: NotificationKind, preview_chars: int
 ) -> str:
-    title = str(post.get("title") or "Untitled post")
+    title = post_title(post)
     url = _post_url(creator, post)
-    date = _format_date(post.get("published") or post.get("added"))
+    date = _format_date(post_display_date(post))
     badge = "" if kind is NotificationKind.NEW else " <span style='color:#996600'>(edited)</span>"
 
     preview_html = ""
-    full_text = _strip_html(str(post.get("content") or ""))
+    full_text = _strip_html(post_content(post))
     preview = full_text[:preview_chars]
     if preview:
         ellipsis = "…" if len(full_text) > preview_chars else ""
@@ -183,26 +214,28 @@ def _render_post_html(
 
 
 def _render_post_text(creator: Creator, post: dict[str, Any], kind: NotificationKind) -> list[str]:
-    title = str(post.get("title") or "Untitled post")
+    title = post_title(post)
     if kind is NotificationKind.EDITED:
         title += " (edited)"
-    date = _format_date(post.get("published") or post.get("added"))
+    date = _format_date(post_display_date(post))
     url = _post_url(creator, post)
     return ["", title, f"Published: {date}", f"View on Pawchive: {url}"]
 
 
-def build_status_email(kind: str, **context: Any) -> tuple[str, str, str]:
-    """Build one of the non-digest status emails: startup, heartbeat, alert, recovered."""
-    builders = {
-        "startup": _build_startup_email,
-        "heartbeat": _build_heartbeat_email,
-        "alert": _build_alert_email,
-        "recovered": _build_recovered_email,
-    }
-    builder = builders.get(kind)
-    if builder is None:
-        raise ValueError(f"unknown status email kind: {kind}")
-    return builder(**context)
+class StatusKind(str, Enum):
+    """The non-digest status emails. Mirrors NotificationKind's pattern.
+
+    build_status_email() still takes a plain string (main.py's call sites
+    read more naturally as _send_notice("alert", ...) than with an enum
+    import at every call site), but dispatch internally goes through this
+    enum instead of a bare dict of string literals, so a typo'd kind is
+    still one clear ValueError instead of a silent KeyError-shaped bug.
+    """
+
+    STARTUP = "startup"
+    HEARTBEAT = "heartbeat"
+    ALERT = "alert"
+    RECOVERED = "recovered"
 
 
 def _build_startup_email(creators: list[Creator]) -> tuple[str, str, str]:
@@ -275,6 +308,23 @@ def _build_recovered_email(recovered: list[str]) -> tuple[str, str, str]:
         "Creator recovery.\n\n"
         f"Creators back to normal:\n{items_text}",
     )
+
+
+_STATUS_BUILDERS = {
+    StatusKind.STARTUP: _build_startup_email,
+    StatusKind.HEARTBEAT: _build_heartbeat_email,
+    StatusKind.ALERT: _build_alert_email,
+    StatusKind.RECOVERED: _build_recovered_email,
+}
+
+
+def build_status_email(kind: str, **context: Any) -> tuple[str, str, str]:
+    """Build one of the non-digest status emails: startup, heartbeat, alert, recovered."""
+    try:
+        resolved = StatusKind(kind)
+    except ValueError as exc:
+        raise ValueError(f"unknown status email kind: {kind}") from exc
+    return _STATUS_BUILDERS[resolved](**context)
 
 
 def send_email(

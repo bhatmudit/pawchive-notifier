@@ -1,5 +1,11 @@
 from config import Creator
-from notifier import Notification, NotificationKind, build_email, build_status_email
+from notifier import (
+    MAX_POSTS_PER_SECTION,
+    Notification,
+    NotificationKind,
+    build_email,
+    build_status_email,
+)
 
 
 CREATOR = Creator(service="patreon", id="123", name="Some Creator")
@@ -112,3 +118,26 @@ def test_build_status_email_unknown_kind_raises():
 
     with pytest.raises(ValueError):
         build_status_email("not-a-real-kind")
+
+
+def test_build_email_caps_posts_per_section_to_bound_size():
+    # A creator dumping a huge backlog of "new" posts at once must not
+    # produce an unbounded email (see MAX_POSTS_PER_SECTION docstring for
+    # why: an oversized payload could otherwise fail to send forever).
+    posts = [_post(id_=str(i), title=f"Post {i}") for i in range(MAX_POSTS_PER_SECTION + 10)]
+
+    _, html_body, text_body = build_email([_notify(CREATOR, posts, NotificationKind.NEW)])
+
+    assert html_body.count("<article>") == MAX_POSTS_PER_SECTION
+    assert "and 10 more" in html_body
+    assert "...and 10 more" in text_body
+
+
+def test_build_email_under_cap_shows_all_posts_no_truncation_note():
+    posts = [_post(id_=str(i)) for i in range(3)]
+
+    _, html_body, text_body = build_email([_notify(CREATOR, posts, NotificationKind.NEW)])
+
+    assert html_body.count("<article>") == 3
+    assert "more not shown" not in html_body
+    assert "more (see state.json" not in text_body

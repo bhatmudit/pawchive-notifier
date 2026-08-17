@@ -8,12 +8,31 @@ from typing import Any
 
 import requests
 
+from constants import API_BASE_URL, USER_AGENT
+
 log = logging.getLogger("pawchive-notifier")
 
-BASE_URL = "https://pawchive.pw/api/v1"
+BASE_URL = API_BASE_URL
 PAGE_SIZE = 50
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 2.0
+
+# Hard ceiling on pages fetched for a single creator in one run. Without
+# this, an API bug that ignores the offset param (or repeats a page) turns
+# the "while True" pagination loop below into an infinite hang that only
+# ends when the CI job's own timeout kills it hours later, with no alert
+# email ever sent. 400 pages is 20,000 posts - far beyond any real
+# creator's post count, but small enough to fail fast if pagination is
+# broken.
+MAX_PAGES = 400
+
+# A shared Session gives connection pooling/keep-alive across all the
+# _fetch_page calls in a run (multiple pages per creator, multiple
+# creators), instead of a fresh TCP+TLS handshake per request. Headers
+# that don't vary per-request live on the session once instead of being
+# rebuilt on every call.
+_session = requests.Session()
+_session.headers.update({"Accept": "application/json", "User-Agent": USER_AGENT})
 
 
 class PawchiveError(RuntimeError):
@@ -38,21 +57,25 @@ def fetch_creator_posts(
     posts: list[dict[str, Any]] = []
     offset = 0
 
-    while True:
+    for page_number in range(1, MAX_PAGES + 1):
         page = _fetch_page(service, creator_id, offset=offset, timeout=timeout)
         page_posts = [post for post in page if isinstance(post, dict) and "id" in post]
         posts.extend(page_posts)
 
         if not page_posts or len(page_posts) < PAGE_SIZE:
-            break
+            return posts
 
         if not bootstrap and any(str(post["id"]) in known_ids for post in page_posts):
-            break
+            return posts
 
         offset += PAGE_SIZE
         time.sleep(0.05)
 
-    return posts
+    raise PawchiveError(
+        f"{service}/{creator_id}: pagination did not terminate after {MAX_PAGES} pages "
+        f"({len(posts)} posts fetched) - the API may be returning a broken or "
+        f"repeating offset; aborting instead of hanging"
+    )
 
 
 def _fetch_page(service: str, creator_id: str, *, offset: int, timeout: int) -> list[Any]:
@@ -66,14 +89,11 @@ def _fetch_page(service: str, creator_id: str, *, offset: int, timeout: int) -> 
     params = {"o": offset} if offset else {}
 
     last_error: Exception | None = None
+    retry_after: float | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        retry_after = None
         try:
-            response = requests.get(
-                url,
-                params=params,
-                headers={"Accept": "application/json"},
-                timeout=timeout,
-            )
+            response = _session.get(url, params=params, timeout=timeout)
         except requests.RequestException as exc:
             last_error = exc
         else:
@@ -93,6 +113,7 @@ def _fetch_page(service: str, creator_id: str, *, offset: int, timeout: int) -> 
                 last_error = PawchiveError(
                     f"HTTP {response.status_code}: {response.text[:300]}"
                 )
+                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             else:
                 # Non-transient client error (400, 401, 403, ...) - don't retry.
                 raise PawchiveError(
@@ -100,7 +121,11 @@ def _fetch_page(service: str, creator_id: str, *, offset: int, timeout: int) -> 
                 )
 
         if attempt < MAX_ATTEMPTS:
-            delay = RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            # Prefer the server's own Retry-After hint (common on 429s)
+            # over our fixed exponential backoff when it's given.
+            delay = retry_after if retry_after is not None else RETRY_BASE_DELAY_SECONDS * (
+                2 ** (attempt - 1)
+            )
             log.warning(
                 "%s/%s: attempt %d/%d failed (%s); retrying in %.0fs",
                 service, creator_id, attempt, MAX_ATTEMPTS, last_error, delay,
@@ -110,3 +135,14 @@ def _fetch_page(service: str, creator_id: str, *, offset: int, timeout: int) -> 
     raise PawchiveError(
         f"request failed after {MAX_ATTEMPTS} attempts: {last_error}"
     ) from last_error
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header (seconds form only; ignore HTTP-date form)."""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
