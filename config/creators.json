@@ -1,6 +1,6 @@
 {
   "settings": {
-    "notify_edits": false,
+    "notify_edits": true,
     "initial_import_notify": false,
     "startup_email": true,
     "alert_on_failure": true,
