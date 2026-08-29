@@ -1,8 +1,6 @@
 name: Pawchive monitor
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       notify_existing:
@@ -37,14 +35,10 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.notify_existing }}" = "true" ]; then
-              python src/main.py --notify-existing
-            else
-              python src/main.py --no-notify-existing
-            fi
+          if [ "${{ inputs.notify_existing }}" = "true" ]; then
+            python src/main.py --notify-existing
           else
-            python src/main.py
+            python src/main.py --no-notify-existing
           fi
 
       - name: Commit state
