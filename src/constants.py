@@ -14,5 +14,5 @@ SITE_BASE_URL = f"https://{PAWCHIVE_DOMAIN}"
 USER_AGENT = (
     "pawchive-notifier/1.0 "
     "(+https://github.com/bhatmudit/pawchive-notifier; unattended monitor bot; "
-    "contact: 213806398+bhatmudit@users.noreply.github.com)"
+    "contact: simplelogin-newsletter.conform524@simplelogin.com)"
 )
