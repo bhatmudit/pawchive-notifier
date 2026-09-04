@@ -11,4 +11,8 @@ PAWCHIVE_DOMAIN = "pawchive.pw"
 API_BASE_URL = f"https://{PAWCHIVE_DOMAIN}/api/v1"
 SITE_BASE_URL = f"https://{PAWCHIVE_DOMAIN}"
 
-USER_AGENT = "pawchive-notifier/1.0 (+https://github.com/; unattended monitor bot)"
+USER_AGENT = (
+    "pawchive-notifier/1.0 "
+    "(+https://github.com/bhatmudit/pawchive-notifier; unattended monitor bot; "
+    "contact: 213806398+bhatmudit@users.noreply.github.com)"
+)
